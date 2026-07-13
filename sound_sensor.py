@@ -15,7 +15,11 @@ import sys
 import time
 
 from gpiozero import Device, DigitalInputDevice
-from gpiozero.pins.lgpio import LGPIOFactory
+
+try:
+    from gpiozero.pins.lgpio import LGPIOFactory
+except Exception:
+    LGPIOFactory = None
 
 # BCM pin numbers (not physical pin numbers)
 DEFAULT_GPIO_PIN = 17
@@ -49,14 +53,25 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
 
-    # Pi 5 needs the lgpio backend (stock RPi.GPIO does not support Pi 5).
-    Device.pin_factory = LGPIOFactory()
+    # Prefer the native lgpio backend on Raspberry Pi 5 when available.
+    if LGPIOFactory is not None:
+        Device.pin_factory = LGPIOFactory()
+    else:
+        print("Warning: LGPIOFactory unavailable; using default gpiozero pin factory")
 
-    sensor = DigitalInputDevice(
-        args.pin,
-        pull_up=True,
-        bounce_time=args.debounce / 1000.0,
-    )
+    try:
+        sensor = DigitalInputDevice(
+            args.pin,
+            pull_up=True,
+            bounce_time=args.debounce / 1000.0,
+        )
+    except Exception as e:
+        print(f"ERROR: Failed to initialize GPIO pin {args.pin}: {e}")
+        print("This usually means:")
+        print("  1. GPIO pin is already in use by another process")
+        print("  2. You don't have permission to access GPIO")
+        print("  3. The pin number is incorrect")
+        return 1
 
     running = True
 
@@ -71,18 +86,28 @@ def main() -> int:
     print(f"  GPIO (BCM): {args.pin}")
     print(f"  Debounce:   {args.debounce} ms")
     print("  Adjust the potentiometer on the module until the LED reacts to your target noise.")
-    print("  Press Ctrl+C to stop.\n")
+    print("  Press Ctrl+C to stop.")
+    print("  Debug: Raw sensor values (0=sound, 1=quiet):\n")
 
     last_state: bool | None = None
+    sample_count = 0
 
     try:
         while running:
-            # DO is active LOW on most KY-038 boards when sound exceeds threshold.
+            # Sensor output: LOW (0) when sound detected, HIGH (1) when quiet
+            # We need to invert: sound_detected should be True when sensor.value is 0
             sound_detected = not sensor.value
+
+            # Print debug info every 20 samples
+            sample_count += 1
+            if sample_count % 20 == 0:
+                state_str = "SOUND" if sound_detected else "quiet"
+                raw_state = "LOW" if sensor.value == 0 else "HIGH"
+                print(f"[{time.strftime('%H:%M:%S')}] Pin: {raw_state} ({sensor.value}) → {state_str}")
 
             if sound_detected != last_state:
                 if sound_detected:
-                    print(f"[{time.strftime('%H:%M:%S')}] SOUND DETECTED")
+                    print(f"[{time.strftime('%H:%M:%S')}] >>> SOUND DETECTED <<<")
                 elif not args.quiet:
                     print(f"[{time.strftime('%H:%M:%S')}] quiet")
                 last_state = sound_detected
